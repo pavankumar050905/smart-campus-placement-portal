@@ -1,0 +1,55 @@
+CAMPUSPATH - START HERE (LOCAL WINDOWS SETUP)
+
+1. Install Node.js 20+ and MongoDB Community Server.
+2. Extract the ZIP.
+3. Open the extracted smart-campus-placement-portal folder in VS Code.
+
+BACKEND SETUP (first time only)
+Open a PowerShell terminal:
+  cd server
+  npm install
+  Copy-Item .env.example .env
+
+Open server/.env and set:
+  MONGODB_URI=mongodb://127.0.0.1:27017/smart_campus_placement
+  JWT_SECRET=<a unique random string at least 32 characters long>
+  CLIENT_URL=http://localhost:5173
+  GROQ_API_KEY=<your private Groq key, optional for assessments>
+
+Do not share server/.env. It is intentionally not included in this ZIP.
+
+SEED DATA (first time only)
+In the server terminal:
+  npm run seed
+  npm run seed:demo
+
+This adds 30 branches, base demo accounts and the synthetic demonstration dataset.
+It does not import actual Alliance University student data.
+
+FRONTEND SETUP (first time only)
+Open a second PowerShell terminal:
+  cd client
+  npm install
+
+START
+Make sure MongoDB is running, then double-click Start_CampusPath.bat.
+It opens backend and frontend terminals and launches http://localhost:5173.
+
+BASE DEMO LOGINS
+Admin:     admin@campus.demo / ChangeMe123!
+Student:   student@campus.demo / ChangeMe123!
+Recruiter: recruiter@campus.demo / ChangeMe123!
+
+SYNTHETIC DATA LOGINS
+Students: demo.student001@campus.demo through demo.student500@campus.demo
+Recruiters: demo.recruiter01@campus.demo through demo.recruiter50@campus.demo
+Password: DemoPass123!
+
+ASSESSMENTS
+Student: Assessments > Generate your own assessment > choose 10/20/30/50 > Generate and start.
+Admin/officer: Assessments > Create university assessment.
+Recruiter: Assessments > select own job > select applicant > Generate and assign.
+
+SECURITY
+All demo accounts are synthetic. Change demo passwords before sharing the app.
+Rotate any API keys or JWT secrets that were previously placed in an uploaded .env file.
