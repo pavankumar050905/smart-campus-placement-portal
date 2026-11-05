@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Clock3, ClipboardCheck, Sparkles, History, ShieldCheck } from 'lucide-react';
 import api from './api';
 
-const COUNTS = [10,20,30,50];
+const SELF_COUNTS = [10, 15, 20, 30, 40, 50];
+const RECRUITER_COUNTS = [10, 15];
 
 export default function Assessments({ user }) {
   const [items,setItems]=useState([]);
@@ -22,6 +23,7 @@ export default function Assessments({ user }) {
   const [difficulty,setDifficulty]=useState('mixed');
   const [duration,setDuration]=useState(30);
   const [branch,setBranch]=useState('');
+  const [branches,setBranches]=useState([]);
   const [jobOptions,setJobOptions]=useState([]);
   const [selectedJob,setSelectedJob]=useState('');
   const [applications,setApplications]=useState([]);
@@ -44,6 +46,15 @@ export default function Assessments({ user }) {
     if(!isRecruiter) return;
     api.get('/recruiter/jobs').then(r=>setJobOptions(r.data||[])).catch(()=>{});
   },[isRecruiter]);
+  useEffect(()=>{
+  if(!isManager) return;
+
+  api.get('/branches')
+    .then(r=>setBranches(r.data||[]))
+    .catch(e=>setError(
+      e.response?.data?.message || 'Could not load engineering branches.'
+    ));
+},[isManager]);
   useEffect(()=>{
     if(!selectedJob || !isRecruiter) {setApplications([]);return;}
     api.get(`/recruiter/jobs/${selectedJob}/applications`).then(r=>setApplications(r.data||[])).catch(()=>setApplications([]));
@@ -92,7 +103,10 @@ export default function Assessments({ user }) {
         skills:skills.split(',').map(s=>s.trim()).filter(Boolean),
         questionCount:Number(count),difficulty,durationMinutes:Number(duration)
       });
-      setMessage(`Your personalised assessment is ready (${data.generationSource==='groq'?'AI-generated':'validated local question bank'}).`);
+      if(data.generationSource !== 'groq') {
+        throw new Error('The AI generator did not return a Groq assessment. Please restart the backend and try again.');
+      }
+      setMessage('Your role-specific AI assessment is ready.');
       setTitle('');await load();
       if(data.assessment?._id) await start(data.assessment._id);
     }catch(e){setError(e.response?.data?.message||'Could not generate assessment.');}
@@ -102,10 +116,11 @@ export default function Assessments({ user }) {
     e.preventDefault();setBusy(true);setError('');setMessage('');
     try{
       const {data}=await api.post('/assessments/university',{
-        title:title||'University placement readiness assessment',targetRole:targetRole||undefined,
-        targetBranch:branch||undefined,skills:skills.split(',').map(s=>s.trim()).filter(Boolean),
-        questionCount:Number(count),difficulty,durationMinutes:Number(duration)
-      });
+  title:title||'University placement readiness assessment',
+  targetRole:targetRole||undefined,
+  targetBranch:branch,
+  durationMinutes:Number(duration)
+});
       setMessage(`University assessment created and assigned to ${data.assignedCount} students.`);
       setTitle('');await load();
     }catch(e){setError(e.response?.data?.message||'Could not create university assessment.');}
@@ -119,7 +134,7 @@ export default function Assessments({ user }) {
         title:title||undefined,skills:skills.split(',').map(s=>s.trim()).filter(Boolean),
         questionCount:Number(count),difficulty,durationMinutes:Number(duration)
       });
-      setMessage(`Assessment assigned successfully (${data.generationSource==='groq'?'AI-generated':'local question bank'}).`);
+      setMessage(`Assessment assigned successfully using ${data.assessment?.questionCount || count} questions from the applicant's branch question bank.`);
       setTitle('');await load();
     }catch(e){setError(e.response?.data?.message||'Could not assign assessment.');}
     finally{setBusy(false);}
@@ -165,35 +180,69 @@ export default function Assessments({ user }) {
       <div className="section-heading"><div><h2><Sparkles size={19}/> Generate your own assessment</h2><p className="muted">Questions adapt to your branch, profile skills, projects and target role.</p></div></div>
       <div className="form-grid">
         <label>Assessment title<input value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Full Stack Developer Readiness"/></label>
-        <label>Target role<input value={targetRole} onChange={e=>setTargetRole(e.target.value)} placeholder="e.g. Java Developer"/></label>
-        <label className="wide">Focus skills (comma separated)<input value={skills} onChange={e=>setSkills(e.target.value)} placeholder="Leave blank to use your profile skills"/></label>
-        <label>Number of questions<select value={count} onChange={e=>setCount(e.target.value)}>{COUNTS.map(n=><option key={n} value={n}>{n}</option>)}</select></label>
-        <label>Difficulty<select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
+<label>
+  Target role
+  <input
+    required
+    value={targetRole}
+    onChange={e=>setTargetRole(e.target.value)}
+    placeholder="e.g. Java Developer"
+  />
+</label>        <label className="wide">Focus skills (comma separated)<input value={skills} onChange={e=>setSkills(e.target.value)} placeholder="Leave blank to use your profile skills"/></label>
+<label>
+  Number of questions
+  <select value={count} onChange={e=>setCount(Number(e.target.value))}>
+    {SELF_COUNTS.map(n=><option key={n} value={n}>{n}</option>)}
+  </select>
+</label>        <label>Difficulty<select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
         <label>Duration (minutes)<input type="number" min="5" max="240" value={duration} onChange={e=>setDuration(e.target.value)}/></label>
       </div>
       <button className="primary" disabled={busy}>{busy?'Generating...':'Generate and start assessment'}</button>
     </form>}
     {isManager&&<form className="panel assessment-form" onSubmit={createUniversity}>
-      <h2><ShieldCheck size={19}/> Create university assessment</h2><p className="muted">Assign to all active student profiles or target one branch.</p>
+      <h2><ShieldCheck size={19}/> Create university assessment</h2><p className="muted">
+  Create a fixed 25-question assessment using the selected branch's saved question bank.
+</p>
       <div className="form-grid">
         <label>Title<input value={title} onChange={e=>setTitle(e.target.value)} placeholder="University placement readiness test"/></label>
-        <label>Target branch (optional)<input value={branch} onChange={e=>setBranch(e.target.value)} placeholder="Leave blank for all branches"/></label>
-        <label>Target role<input value={targetRole} onChange={e=>setTargetRole(e.target.value)} placeholder="Software Engineer"/></label>
-        <label>Focus skills<input value={skills} onChange={e=>setSkills(e.target.value)} placeholder="DSA, SQL, Java"/></label>
-        <label>Questions<select value={count} onChange={e=>setCount(e.target.value)}>{COUNTS.map(n=><option key={n} value={n}>{n}</option>)}</select></label>
-        <label>Difficulty<select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
+<label>
+  Target branch
+  <select
+    required
+    value={branch}
+    onChange={e=>setBranch(e.target.value)}
+  >
+    <option value="">Select engineering branch</option>
+    {branches.map(b=>(
+      <option key={b._id || b.code} value={b.name}>
+        {b.code} - {b.name}
+      </option>
+    ))}
+  </select>
+</label>        <label>Target role<input value={targetRole} onChange={e=>setTargetRole(e.target.value)} placeholder="Software Engineer"/></label>
+<label>
+  Questions
+  <input type="text" value="25 (Fixed)" readOnly />
+</label>        
         <label>Duration (minutes)<input type="number" min="5" max="240" value={duration} onChange={e=>setDuration(e.target.value)}/></label>
       </div><button className="primary" disabled={busy}>{busy?'Creating...':'Create and assign'}</button>
     </form>}
     {isRecruiter&&<form className="panel assessment-form" onSubmit={assignCompany}>
-      <h2><ClipboardCheck size={19}/> Assign a company assessment</h2><p className="muted">Choose one of your jobs and an applicant. The question set is generated for that applicant and role.</p>
+      <h2><ClipboardCheck size={19}/> Assign a company assessment</h2><p className="muted">
+  Choose one of your jobs and an applicant. Questions are randomly selected
+  from the applicant's branch-specific question bank.
+</p>
       <div className="form-grid">
         <label>Job<select required value={selectedJob} onChange={e=>{setSelectedJob(e.target.value);setSelectedApplication('');}}><option value="">Select job</option>{jobOptions.map(j=><option key={j._id} value={j._id}>{j.title}</option>)}</select></label>
         <label>Applicant<select required value={selectedApplication} onChange={e=>setSelectedApplication(e.target.value)}><option value="">Select applicant</option>{applications.map(a=><option key={a._id} value={a._id}>{a.student?.user?.name||a.student?.studentId||'Student'} · {a.status}</option>)}</select></label>
         <label>Assessment title<input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Technical screening"/></label>
         <label>Focus skills<input value={skills} onChange={e=>setSkills(e.target.value)} placeholder="Leave blank to use job requirements"/></label>
-        <label>Questions<select value={count} onChange={e=>setCount(e.target.value)}>{COUNTS.map(n=><option key={n} value={n}>{n}</option>)}</select></label>
-        <label>Difficulty<select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
+<label>
+  Questions
+  <select value={count} onChange={e=>setCount(Number(e.target.value))}>
+    {RECRUITER_COUNTS.map(n=><option key={n} value={n}>{n}</option>)}
+  </select>
+</label>        <label>Difficulty<select value={difficulty} onChange={e=>setDifficulty(e.target.value)}><option value="mixed">Mixed</option><option value="easy">Easy</option><option value="medium">Medium</option><option value="hard">Hard</option></select></label>
         <label>Duration (minutes)<input type="number" min="5" max="240" value={duration} onChange={e=>setDuration(e.target.value)}/></label>
       </div><button className="primary" disabled={busy||!selectedApplication}>{busy?'Assigning...':'Generate and assign assessment'}</button>
     </form>}

@@ -1,7 +1,17 @@
 import Groq from 'groq-sdk';
 
-const cleanList = value => Array.isArray(value) ? value.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim()) : [];
+if (process.env.NODE_ENV !== 'production') {
+  console.info('[assessment] Groq-only assessment service loaded:', import.meta.url);
+}
 
+const cleanList = value => Array.isArray(value)
+  ? value
+      .filter(item => typeof item === 'string' && item.trim())
+      .map(item => item.trim())
+  : [];
+
+// Kept for synthetic demo-data seeding only. This bank is never used to
+// generate a student's role-specific self-assessment.
 export const fallbackBank = [
   { topic:'Programming fundamentals', type:'conceptual', prompt:'Which principle helps hide internal object state and expose controlled operations?', options:['Encapsulation','Compilation','Recursion','Normalization'], correctOption:0, explanation:'Encapsulation bundles state and methods while controlling access.' },
   { topic:'Data structures', type:'conceptual', prompt:'Which data structure follows the LIFO order?', options:['Queue','Stack','Graph','Heap'], correctOption:1, explanation:'A stack removes the most recently inserted item first.' },
@@ -30,39 +40,70 @@ export const fallbackBank = [
   { topic:'Software engineering', type:'scenario', prompt:'A team wants to merge small changes frequently and run automated checks. Which practice supports this?', options:['Continuous integration','Big-bang integration','Manual deployment only','Code freeze forever'], correctOption:0, explanation:'Continuous integration frequently merges changes and validates them with automated builds and tests.' }
 ];
 
-function validateQuestions(input, count, difficulty) {
+export function validateQuestions(input, count, difficulty = 'mixed') {
   if (!Array.isArray(input)) return [];
-  return input.slice(0, count).filter(q =>
-    q && typeof q.prompt === 'string' && q.prompt.trim().length >= 8 &&
-    Array.isArray(q.options) && q.options.length === 4 &&
-    q.options.every(o => typeof o === 'string' && o.trim()) &&
-    Number.isInteger(Number(q.correctOption)) && Number(q.correctOption) >= 0 && Number(q.correctOption) <= 3
-  ).map(q => ({
-    prompt: q.prompt.trim().slice(0, 1200),
-    type: ['conceptual','debugging','scenario','output','coding'].includes(q.type) ? q.type : 'conceptual',
-    options: q.options.map(o => String(o).trim().slice(0, 500)),
-    correctOption: Number(q.correctOption),
-    explanation: String(q.explanation || '').slice(0, 1000),
-    topic: String(q.topic || 'General').slice(0, 100),
-    difficulty: ['easy','medium','hard'].includes(q.difficulty) ? q.difficulty : (difficulty === 'mixed' ? 'medium' : difficulty),
-    points: 1
-  }));
-}
 
-function fallbackQuestions({ skills, count, difficulty }) {
-  const requested = cleanList(skills);
-  const ordered = [...fallbackBank].sort((a,b) => {
-    const score = item => requested.some(s => item.topic.toLowerCase().includes(s.toLowerCase()) || s.toLowerCase().includes(item.topic.toLowerCase())) ? 1 : 0;
-    return score(b)-score(a);
-  });
-  const result = [];
-  for (let i=0; i<count; i++) {
-    const q = ordered[i % ordered.length];
-    result.push({ ...q, options:[...q.options], difficulty: difficulty === 'mixed' ? ['easy','medium','hard'][i%3] : difficulty });
+  const seenPrompts = new Set();
+  const valid = [];
+
+  for (const question of input) {
+    if (
+      !question ||
+      typeof question.prompt !== 'string' ||
+      question.prompt.trim().length < 8 ||
+      !Array.isArray(question.options) ||
+      question.options.length !== 4 ||
+      !question.options.every(option => typeof option === 'string' && option.trim()) ||
+      new Set(question.options.map(option => option.trim().toLowerCase())).size !== 4 ||
+      !Number.isInteger(question.correctOption) ||
+      question.correctOption < 0 ||
+      question.correctOption > 3
+    ) {
+      continue;
+    }
+
+    const prompt = question.prompt.trim();
+    const promptKey = prompt.toLowerCase().replace(/\s+/g, ' ');
+    if (seenPrompts.has(promptKey)) continue;
+    seenPrompts.add(promptKey);
+
+    const requestedDifficulty = ['easy', 'medium', 'hard'].includes(difficulty)
+      ? difficulty
+      : null;
+    const questionDifficulty = ['easy', 'medium', 'hard'].includes(question.difficulty)
+      ? question.difficulty
+      : (requestedDifficulty || ['easy', 'medium', 'hard'][valid.length % 3]);
+
+    valid.push({
+      prompt: prompt.slice(0, 1200),
+      type: ['conceptual', 'debugging', 'scenario', 'output', 'coding'].includes(question.type)
+        ? question.type
+        : 'conceptual',
+      options: question.options.map(option => option.trim().slice(0, 500)),
+      correctOption: question.correctOption,
+      explanation: String(question.explanation || '').trim().slice(0, 1000),
+      topic: String(question.topic || 'Role-specific technical skills').trim().slice(0, 100),
+      difficulty: requestedDifficulty || questionDifficulty,
+      points: 1
+    });
+
+    if (valid.length === count) break;
   }
-  return result;
+
+  return valid;
 }
 
+function buildStudentContext(student) {
+  return {
+    branch: student?.branch || 'Not specified',
+    profileSkills: cleanList(student?.skills),
+    projects: (Array.isArray(student?.projects) ? student.projects : []).slice(0, 10).map(project => ({
+      title: String(project?.title || '').slice(0, 120),
+      description: String(project?.description || '').slice(0, 500),
+      technologies: cleanList(project?.technologies).slice(0, 20)
+    }))
+  };
+}
 
 export async function generateAssessmentQuestions({
   student,
@@ -73,6 +114,8 @@ export async function generateAssessmentQuestions({
   mode = 'self'
 }) {
   const role = String(targetRole || '').trim();
+  const selectedFocusSkills = cleanList(skills);
+  const studentContext = mode === 'self' ? buildStudentContext(student) : null;
 
   if (role.length < 2) {
     const error = new Error('Please enter a valid target role.');
@@ -80,88 +123,92 @@ export async function generateAssessmentQuestions({
     throw error;
   }
 
+  if (!Number.isInteger(count) || count < 1 || count > 50) {
+    const error = new Error('Question count must be between 1 and 50.');
+    error.status = 400;
+    throw error;
+  }
+
   if (!process.env.GROQ_API_KEY) {
-    const error = new Error('Groq API key is not configured.');
+    const error = new Error(
+      'Groq is not configured. Add GROQ_API_KEY to server/.env to generate AI assessments.'
+    );
     error.status = 503;
     throw error;
   }
 
   try {
     const groq = new Groq({
-      apiKey: process.env.GROQ_API_KEY
+      apiKey: process.env.GROQ_API_KEY,
+      timeout: 90000,
+      maxRetries: 1
     });
 
     const response = await groq.chat.completions.create({
       model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
-      temperature: 0.25,
-      max_completion_tokens: Math.min(7000, 1800 + count * 100),
+      temperature: 0.2,
+      max_completion_tokens: Math.min(7000, 2000 + count * 100),
       response_format: { type: 'json_object' },
-
       messages: [
         {
           role: 'system',
           content: `
-You are a professional technical assessment generator.
+You create accurate, role-specific technical multiple-choice assessments.
 
 ASSESSMENT MODE: ${mode}
-TARGET: ${role}
-
-STRICT RULES:
+TARGET ROLE OR BRANCH: ${role}
+REQUESTED QUESTION COUNT: ${count}
+REQUESTED DIFFICULTY: ${difficulty}
 
 ${mode === 'self' ? `
-STUDENT SELF-ASSESSMENT:
-Generate questions exclusively about the student's entered target job role: ${role}.
-
-Do not generate questions based on the student's academic branch,
-unrelated skills, projects, generic CSE subjects or aptitude.
-
-Every question must directly relate to the responsibilities,
-technical knowledge and practical skills required for ${role}.
+STUDENT SELF-ASSESSMENT RULES:
+1. The target job role "${role}" is the primary requirement. Every question must assess knowledge or practical judgement genuinely relevant to this role.
+2. Prioritise the student's selected focus skills listed in the user context. Cover those skills across the assessment; do not replace them with generic computer-science topics.
+3. Use academic branch, profile skills and project experience only as supporting context. They must not override the target role or selected focus skills.
+4. If selected focus skills are provided, make the majority of questions directly assess those skills in the context of "${role}".
+5. If selected focus skills are empty, derive the role's core technical competencies and assess those.
+6. Do not include unrelated generic programming, aptitude, operating-system, networking or database questions unless they are directly relevant to the target role or selected skills.
+7. Use practical engineering scenarios and applied questions where appropriate.
 ` : `
-UNIVERSITY BRANCH ASSESSMENT:
-Generate questions exclusively about the engineering branch: ${role}.
-
-Cover the core subjects, technical concepts and practical
-applications of this specific engineering branch.
-
-Do not include unrelated CSE, programming or aptitude questions.
+BRANCH ASSESSMENT RULES:
+1. Generate questions exclusively about the engineering branch "${role}".
+2. Cover its core subjects, technical concepts, tools and practical applications.
+3. Do not include unrelated CSE, programming or aptitude questions.
 `}
 
-Generate exactly ${count} questions.
+Generate exactly ${count} distinct questions. Do not repeat prompts or test the same fact with trivial rewording.
 
-Difficulty: ${difficulty}.
+Each question must contain:
+- A clear, technically accurate prompt.
+- Exactly four distinct, plausible options.
+- Exactly one correct answer, represented by correctOption as a zero-based integer (0, 1, 2 or 3).
+- A concise explanation.
+- A specific technical topic.
+- Difficulty matching "${difficulty}". For mixed difficulty, include a reasonable mix of easy, medium and hard questions.
 
-Each question must have:
-- Four plausible options.
-- Exactly one correct answer.
-- A clear explanation.
-- A relevant technical topic.
-- Appropriate difficulty.
-
-Return ONLY valid JSON in this format:
-
+Return only valid JSON with this structure:
 {
   "questions": [
     {
-      "prompt": "Question",
+      "prompt": "Question text",
       "type": "conceptual",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctOption": 0,
-      "explanation": "Explanation",
-      "topic": "Relevant subject",
-      "difficulty": "easy"
+      "explanation": "Why this answer is correct",
+      "topic": "Specific technical topic",
+      "difficulty": "medium"
     }
   ]
 }
-
-No markdown or additional text.
+Do not include markdown, comments or additional text.
 `
-
         },
         {
           role: 'user',
           content: JSON.stringify({
             targetRole: role,
+            selectedFocusSkills,
+            studentContext,
             questionCount: count,
             difficulty,
             mode
@@ -170,51 +217,48 @@ No markdown or additional text.
       ]
     });
 
-    const raw = response.choices?.[0]?.message?.content || '';
+    const raw = response.choices?.[0]?.message?.content;
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new Error('Groq returned an empty assessment response.');
+    }
 
     const parsed = JSON.parse(
-      raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+      raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
     );
 
-    const valid = validateQuestions(
-      parsed.questions,
-      count,
-      difficulty
-    );
+    const questions = validateQuestions(parsed.questions, count, difficulty);
 
-    if (valid.length !== count) {
-  console.error('Groq validation details:', {
-    requested: count,
-    received: Array.isArray(parsed.questions)
-      ? parsed.questions.length
-      : 'questions array missing',
-    valid: valid.length
-  });
-
-  throw new Error(
-    `Expected ${count} valid questions, received ${valid.length}.`
-  );
-}
+    if (questions.length !== count) {
+      console.error('[assessment] Groq returned an incomplete or invalid question set', {
+        requested: count,
+        received: Array.isArray(parsed.questions) ? parsed.questions.length : 'missing',
+        valid: questions.length
+      });
+      throw new Error(`Groq returned ${questions.length} valid questions; ${count} are required.`);
+    }
 
     return {
-      questions: valid,
+      questions,
       generationSource: 'groq'
     };
-
   } catch (error) {
-    console.error('Assessment generation failed:', error.message);
+    console.error('[assessment] Groq generation failed:', {
+      message: error.message,
+      status: error.status || error.statusCode || null,
+      code: error.code || null
+    });
 
     const failure = new Error(
-      `Unable to generate a role-specific assessment for ${role}. Please try again.`
+      `Unable to generate a role-specific assessment for "${role}". ${error.status === 429 || error.statusCode === 429
+        ? 'Groq rate limit reached; please try again shortly.'
+        : 'Please verify the Groq configuration and try again.'}`
     );
-
-     failure.status = error.status || error.statusCode || 503;
-  failure.code = error.code;
-  failure.cause = error;
+    failure.status = error.status || error.statusCode || 503;
+    failure.code = error.code;
+    failure.cause = error;
     throw failure;
   }
 }
-
 
 export function publicAssessment(assessment) {
   const obj = assessment.toObject ? assessment.toObject() : { ...assessment };

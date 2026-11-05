@@ -14,7 +14,7 @@ Open server/.env and set:
   MONGODB_URI=mongodb://127.0.0.1:27017/smart_campus_placement
   JWT_SECRET=<a unique random string at least 32 characters long>
   CLIENT_URL=http://localhost:5173
-  GROQ_API_KEY=<your private Groq key, optional for assessments>
+  GROQ_API_KEY=<your private Groq key; required for student AI self-assessments>
 
 Do not share server/.env. It is intentionally not included in this ZIP.
 
@@ -25,6 +25,10 @@ In the server terminal:
 
 This adds 30 branches, base demo accounts and the synthetic demonstration dataset.
 It does not import actual Alliance University student data.
+
+For a brand-new database only, if the 30 saved branch question banks are missing,
+run `npm run refresh:assessments` once after configuring GROQ_API_KEY.
+Do not run this refresh on your already-populated CampusPath database.
 
 FRONTEND SETUP (first time only)
 Open a second PowerShell terminal:
@@ -46,9 +50,9 @@ Recruiters: demo.recruiter01@campus.demo through demo.recruiter50@campus.demo
 Password: DemoPass123!
 
 ASSESSMENTS
-Student: Assessments > Generate your own assessment > choose 10/20/30/50 > Generate and start.
+Student: Assessments > Generate your own assessment > choose 10/15/20/30/40/50 > Generate and start (requires Groq API key).
 Admin/officer: Assessments > Create university assessment.
-Recruiter: Assessments > select own job > select applicant > Generate and assign.
+Recruiter: Assessments > select own job > select applicant > choose 10 or 15 questions > Generate and assign.
 
 SECURITY
 All demo accounts are synthetic. Change demo passwords before sharing the app.

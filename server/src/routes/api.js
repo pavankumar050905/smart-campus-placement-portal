@@ -245,7 +245,10 @@ const assessmentRequestSchema = z.object({
     z.literal(10),
     z.literal(15),
     z.literal(20),
-    z.literal(25)
+    z.literal(25),
+     z.literal(30),
+  z.literal(40),
+  z.literal(50)
   ]).default(10),
 
   difficulty: z.enum(['easy', 'medium', 'hard', 'mixed']).default('mixed'),
@@ -264,9 +267,16 @@ function questionPayload(question, index) {
 }
 
 async function studentCanAccessAssessment(assessment, student) {
-  if (!assessment.active) return false;
-  if (assessment.scope === 'university') return !assessment.targetBranch || assessment.targetBranch === student.branch;
-  return assessment.assignedStudents.some(id => String(id) === String(student._id));
+  if (!assessment.active || assessment.isDemo) return false;
+
+  if (assessment.scope === 'university') {
+    return !assessment.targetBranch ||
+      assessment.targetBranch === student.branch;
+  }
+
+  return assessment.assignedStudents.some(
+    id => String(id) === String(student._id)
+  );
 }
 
 router.get('/assessments', authenticate, async (req, res, next) => {
@@ -276,8 +286,20 @@ router.get('/assessments', authenticate, async (req, res, next) => {
     if (req.user.role === 'student') {
       currentStudent = await Student.findOne({ user: req.user._id });
       if (!currentStudent) return res.status(400).json({ message:'Student profile missing' });
-      query = { ...query, $or:[{ scope:'university', $or:[{targetBranch:''},{targetBranch:currentStudent.branch}] }, { assignedStudents:currentStudent._id }] };
-    } else if (req.user.role === 'recruiter') {
+query = {
+  ...query,
+  isDemo: { $ne: true },
+  $or: [
+    {
+      scope: 'university',
+      $or: [
+        { targetBranch: '' },
+        { targetBranch: currentStudent.branch }
+      ]
+    },
+    { assignedStudents: currentStudent._id }
+  ]
+};    } else if (req.user.role === 'recruiter') {
       const recruiter = await Recruiter.findOne({ user:req.user._id });
       if (!recruiter) return res.status(400).json({message:'Recruiter profile missing'});
       query = { ...query, recruiter:recruiter._id, scope:'company' };
@@ -302,10 +324,31 @@ router.post('/assessments/generate', authenticate, allowRoles('student'), async 
     const student = await Student.findOne({ user:req.user._id });
     if (!student) return res.status(400).json({ message:'Complete your student profile first.' });
     const skills = input.skills?.length ? input.skills : (student.skills || []);
+    console.info('[assessment] self request:', {
+      role: input.targetRole,
+      focusSkills: skills,
+      count: input.questionCount,
+      difficulty: input.difficulty
+    });
     const generated = await generateAssessmentQuestions({
       student, skills, targetRole:input.targetRole, count:input.questionCount,
       difficulty:input.difficulty, mode:'self'
     });
+
+    // Never save a generic/offline question set as a personalised AI assessment.
+    if (generated.generationSource !== 'groq') {
+      const generationError = new Error(
+        'The AI assessment generator is not active. Restart the backend from this project folder and verify GROQ_API_KEY.'
+      );
+      generationError.status = 503;
+      throw generationError;
+    }
+
+    console.info('[assessment] self assessment generated:', {
+      source: generated.generationSource,
+      count: generated.questions.length
+    });
+
     const assessment = await Assessment.create({
       title:input.title || `${input.targetRole || student.branch} personalised practice`,
       description:`Personalised ${input.difficulty} assessment generated for ${student.branch}.`,
@@ -321,75 +364,230 @@ router.post('/assessments/generate', authenticate, allowRoles('student'), async 
 router.post('/assessments/university', authenticate, allowRoles('admin','officer'), async (req,res,next) => {
   try {
     const input = assessmentRequestSchema.extend({
-      targetBranch:z.string().trim().max(120).optional(),
-      description:z.string().max(2000).optional()
+      targetBranch: z.string().trim().min(1).max(120),
+      description: z.string().max(2000).optional()
     }).parse(req.body);
-    const branchFilter = input.targetBranch ? { branch:input.targetBranch } : {};
-    const students = await Student.find(branchFilter).populate('user','_id').limit(500);
-    const generated = await generateAssessmentQuestions({
-  student: {
-    branch: input.targetBranch || 'All engineering branches',
-    skills: input.skills || []
-  },
-  skills: input.skills || [],
-  targetRole: input.targetBranch || input.targetRole || 'All engineering branches',
-  count: input.questionCount,
-  difficulty: input.difficulty,
-  mode: 'university'
-});
-    const assessment = await Assessment.create({
-      title:input.title || 'University placement assessment',
-      description:input.description || 'University-wide assessment for placement readiness.',
-      scope:'university', createdBy:req.user._id, assignedStudents:students.map(s=>s._id),
-      targetBranch:input.targetBranch || '', targetRole:input.targetRole || '',
-      skills:input.skills || [], difficulty:input.difficulty,
-      durationMinutes:input.durationMinutes, questionCount:generated.questions.length,
-      questions:generated.questions, active:true
+
+    // Find the selected active branch.
+    const branch = await Branch.findOne({
+      name: input.targetBranch,
+      active: true
     });
-    if (students.length) {
-      await Notification.insertMany(students.filter(s=>s.user?._id).map(s=>({
-        user:s.user._id, title:'University assessment available',
-        message:`${assessment.title} is now available in your Assessments workspace.`
-      })));
+
+    if (!branch) {
+      return res.status(404).json({
+        message: 'Selected engineering branch was not found.'
+      });
     }
-    res.status(201).json({ assessment:{...assessment.toObject(),questions:undefined}, generationSource:generated.generationSource, assignedCount:students.length });
-  } catch(e) { next(e); }
+
+    // Retrieve the existing 25-question branch assessment.
+    const branchAssessment = await Assessment.findOne({
+      isDemo: true,
+      scope: 'university',
+      targetBranch: branch.name,
+      active: true,
+      questionCount: 25
+    }).select('+questions');
+
+    if (
+      !branchAssessment ||
+      !Array.isArray(branchAssessment.questions) ||
+      branchAssessment.questions.length !== 25
+    ) {
+      return res.status(404).json({
+        message: `The saved 25-question assessment for ${branch.name} is unavailable.`
+      });
+    }
+
+    // Find students belonging to this branch.
+    const students = await Student.find({
+      branch: branch.name
+    }).populate('user', '_id').limit(500);
+
+    if (!students.length) {
+      return res.status(400).json({
+        message: 'No students are registered under this branch.'
+      });
+    }
+
+    // Create a separate assessment using copied questions.
+    const questions = branchAssessment.questions.map(q =>
+      q.toObject ? q.toObject() : q
+    );
+
+    const assessment = await Assessment.create({
+      title: input.title || `${branch.name} University Assessment`,
+      description: input.description ||
+        `Branch-specific assessment for ${branch.name}.`,
+      scope: 'university',
+      createdBy: req.user._id,
+      assignedStudents: students.map(s => s._id),
+      targetBranch: branch.name,
+      targetRole: input.targetRole || branch.name,
+      skills: branchAssessment.skills || [],
+      difficulty: branchAssessment.difficulty,
+      durationMinutes: input.durationMinutes,
+      questionCount: 25,
+      questions,
+      active: true
+    });
+
+    // Notify assigned students.
+    await Notification.insertMany(
+      students.filter(s => s.user?._id).map(s => ({
+        user: s.user._id,
+        title: 'University assessment available',
+        message: `${assessment.title} is now available in your Assessments workspace.`
+      }))
+    );
+
+    res.status(201).json({
+      assessment: {
+        ...assessment.toObject(),
+        questions: undefined
+      },
+      generationSource: 'branch-bank',
+      assignedCount: students.length
+    });
+
+  } catch(e) {
+    next(e);
+  }
 });
+
 
 router.post('/assessments/assign', authenticate, allowRoles('admin','officer','recruiter'), async (req,res,next) => {
   try {
     const input = assessmentRequestSchema.extend({
-      applicationId:z.string().min(1),
-      description:z.string().max(2000).optional()
+      applicationId: z.string().min(1),
+      questionCount: z.union([z.literal(10), z.literal(15)]),
+      description: z.string().max(2000).optional()
     }).parse(req.body);
+
     const application = await Application.findById(input.applicationId).populate('job');
-    if (!application || !application.job) return res.status(404).json({message:'Application or associated job not found'});
-    let recruiter = null;
-    if (req.user.role === 'recruiter') {
-      recruiter = await Recruiter.findOne({user:req.user._id});
-      if (!recruiter || String(application.job.recruiter) !== String(recruiter._id)) return res.status(403).json({message:'You can only assign assessments to applicants for your own jobs.'});
+
+    if (!application || !application.job) {
+      return res.status(404).json({
+        message: 'Application or associated job not found.'
+      });
     }
+
+    // Preserve recruiter ownership validation.
+    let recruiter = null;
+
+    if (req.user.role === 'recruiter') {
+      recruiter = await Recruiter.findOne({ user: req.user._id });
+
+      if (
+        !recruiter ||
+        String(application.job.recruiter) !== String(recruiter._id)
+      ) {
+        return res.status(403).json({
+          message: 'You can only assign assessments to applicants for your own jobs.'
+        });
+      }
+    }
+
     const student = await Student.findById(application.student);
-    if (!student) return res.status(404).json({message:'Applicant student profile not found'});
-    const generated = await generateAssessmentQuestions({
-      student, skills:input.skills?.length ? input.skills : (application.job.requiredSkills || []),
-      targetRole:input.targetRole || application.job.title, count:input.questionCount,
-      difficulty:input.difficulty, mode:'company'
-    });
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'Applicant student profile not found.'
+      });
+    }
+
+    // Retrieve the applicant's saved 25-question branch bank.
+    const branchAssessment = await Assessment.findOne({
+      isDemo: true,
+      scope: 'university',
+      targetBranch: student.branch,
+      active: true,
+      questionCount: 25
+    }).select('+questions');
+
+    if (
+      !branchAssessment ||
+      !Array.isArray(branchAssessment.questions) ||
+      branchAssessment.questions.length !== 25
+    ) {
+      return res.status(404).json({
+        message: `The saved 25-question assessment for ${student.branch} is unavailable.`
+      });
+    }
+
+    // Copy and randomly select 10 or 15 questions.
+    const shuffledQuestions = branchAssessment.questions.map(q =>
+      q.toObject ? q.toObject() : q
+    );
+
+    // Fisher-Yates shuffle.
+    for (let i = shuffledQuestions.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+
+      [shuffledQuestions[i], shuffledQuestions[j]] =
+        [shuffledQuestions[j], shuffledQuestions[i]];
+    }
+
+    const selectedQuestions = shuffledQuestions.slice(
+      0,
+      input.questionCount
+    );
+
     const assessment = await Assessment.create({
-      title:input.title || `${application.job.title} screening assessment`,
-      description:input.description || `Assessment assigned for ${application.job.title}.`,
-      scope:'company', createdBy:req.user._id, recruiter:recruiter?._id || application.job.recruiter,
-      job:application.job._id, application:application._id, assignedStudents:[student._id],
-      targetBranch:student.branch, targetRole:application.job.title,
-      skills:input.skills?.length ? input.skills : application.job.requiredSkills,
-      difficulty:input.difficulty, durationMinutes:input.durationMinutes,
-      questionCount:generated.questions.length, questions:generated.questions, active:true
+      title: input.title || `${application.job.title} screening assessment`,
+      description: input.description ||
+        `Assessment assigned for ${application.job.title}.`,
+
+      scope: 'company',
+      createdBy: req.user._id,
+      recruiter: recruiter?._id || application.job.recruiter,
+
+      job: application.job._id,
+      application: application._id,
+      assignedStudents: [student._id],
+
+      targetBranch: student.branch,
+      targetRole: input.targetRole || application.job.title,
+
+      skills: input.skills?.length
+        ? input.skills
+        : (application.job.requiredSkills || []),
+
+      difficulty: input.difficulty,
+      durationMinutes: input.durationMinutes,
+
+      questionCount: selectedQuestions.length,
+      questions: selectedQuestions,
+      active: true
     });
-    await Notification.create({ user:(await User.findById(student.user))._id, title:'Assessment assigned', message:`${assessment.title} has been assigned to you.` });
-    res.status(201).json({ assessment:{...assessment.toObject(),questions:undefined}, generationSource:generated.generationSource });
-  } catch(e) { next(e); }
+
+    const applicantUser = await User.findById(student.user);
+
+    if (!applicantUser) {
+      return res.status(404).json({
+        message: 'Applicant user account not found.'
+      });
+    }
+
+    await Notification.create({
+      user: applicantUser._id,
+      title: 'Assessment assigned',
+      message: `${assessment.title} has been assigned to you.`
+    });
+
+    res.status(201).json({
+      assessment: {
+        ...assessment.toObject(),
+        questions: undefined
+      },
+      generationSource: 'branch-bank'
+    });
+
+  } catch(e) {
+    next(e);
+  }
 });
+
 
 router.post('/assessments/:id/start', authenticate, allowRoles('student'), async (req,res,next) => {
   try {

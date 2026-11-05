@@ -5,18 +5,20 @@ A local MERN placement portal with role-based student, recruiter and administrat
 ## Requirements
 - Node.js 20+ and npm
 - MongoDB Community running locally, or a MongoDB Atlas connection string
-- Optional Groq API key for AI-generated career guidance and assessment questions
+- Groq API key for AI-generated student self-assessments and career guidance
 
 ## Windows quick start
 1. Extract the ZIP and open the inner `smart-campus-placement-portal` folder in VS Code.
 2. Copy `server/.env.example` to `server/.env`.
-3. Set `MONGODB_URI`, a long random `JWT_SECRET`, `CLIENT_URL`, and optionally `GROQ_API_KEY` in `server/.env`.
+3. Set `MONGODB_URI`, a long random `JWT_SECRET`, `CLIENT_URL`, and `GROQ_API_KEY` in `server/.env`.
 4. Backend terminal:
    ```powershell
    cd server
    npm install
    npm run seed
    npm run seed:demo
+   # Only for a new database that does not yet contain the 30 saved branch banks:
+   npm run refresh:assessments
    npm run dev
    ```
 5. Frontend terminal:
@@ -48,13 +50,13 @@ The backend reads:
 GROQ_API_KEY=your_private_key
 GROQ_MODEL=openai/gpt-oss-20b
 ```
-Keep the key in `server/.env` only. Do not place it in `client/.env`, commit `.env` files, or paste secrets into chat. If Groq is not configured or returns an invalid response, the assessment question generator falls back to a built-in question bank. The career guidance endpoint still requires a working Groq key.
+Keep the key in `server/.env` only. Do not place it in `client/.env`, commit `.env` files, or paste secrets into chat. Student self-assessments require a working Groq key and fail safely if it is missing or returns invalid questions; they never silently substitute generic questions. University and recruiter assessments use the saved branch-specific MongoDB question banks and do not call Groq. The career guidance endpoint also requires a working Groq key.
 
 ## Assessment capabilities
 - Students can generate self-practice assessments whenever they want.
 - University administrators/officers can create university-wide assessments, optionally targeting one branch.
 - Recruiters can create applicant-specific company assessments for applications to their own jobs.
-- Question counts: 10, 20, 30 or 50; difficulty: easy, medium, hard or mixed.
+- Student self-assessment counts: 10, 15, 20, 30, 40 or 50. University assessments use 25 fixed branch-bank questions. Recruiter assessments use 10 or 15 randomly selected branch-bank questions.
 - Configurable timed sessions; the backend controls expiry and evaluates answers.
 - Correct options and explanations are not sent to the browser during the test. They are returned only after submission.
 - Results include score, percentage, topic-level breakdown, answer review and recommended improvement areas.
@@ -90,6 +92,7 @@ Backend (`server/`):
 - `npm run dev` — start API in watch mode
 - `npm run seed` — create the base demo accounts and branch catalogue
 - `npm run seed:demo` — create synthetic dataset
+- `npm run refresh:assessments` — create/reuse the 30 saved branch question banks (only when missing; requires Groq for generation)
 - `npm test` — run backend tests
 
 Frontend (`client/`):

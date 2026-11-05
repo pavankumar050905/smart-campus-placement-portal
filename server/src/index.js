@@ -21,7 +21,10 @@ app.use((err, _req, res, _next) => {
   if (err?.name === 'ZodError') return res.status(400).json({ message: 'Invalid input', issues: err.issues });
   if (err?.name === 'ValidationError') return res.status(400).json({ message: 'Validation failed', details: err.message });
   if (err?.name === 'CastError') return res.status(400).json({ message: 'Invalid identifier' });
-  if (err?.status && err.status < 500) return res.status(err.status).json({ message: err.message });
+  if (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599) {
+    if (err.status >= 500) console.error(err?.message || 'Request failed');
+    return res.status(err.status).json({ message: err.message || 'Request failed' });
+  }
   console.error(err?.message || 'Unhandled error');
   res.status(500).json({ message: 'Internal server error' });
 });
