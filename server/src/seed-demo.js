@@ -93,12 +93,20 @@ for(let i=0;i<1000;i++){
     eligibilitySnapshot:{eligible:true,reasons:[]},isDemo:true
   }},{upsert:true});
 }
-const demoQuestions=[];
-for(let i=0;i<25;i++){
-  const q=fallbackBank[i%fallbackBank.length];
+const demoQuestions = [];
+
+for (let i = 0; i < 25; i++) {
+  const q = fallbackBank[i % fallbackBank.length];
+
   demoQuestions.push({
-    prompt:q.prompt, type:q.type, options:q.options, correctOption:q.correctOption,
-    explanation:q.explanation, topic:q.topic, difficulty:['easy','medium','hard'][i%3],points:1
+    prompt: q.prompt,
+    type: q.type,
+    options: q.options,
+    correctOption: q.correctOption,
+    explanation: q.explanation,
+    topic: q.topic,
+    difficulty: ['easy', 'medium', 'hard'][i % 3],
+    points: 1
   });
 }
 const assessments=[];

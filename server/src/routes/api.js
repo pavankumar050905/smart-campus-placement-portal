@@ -232,15 +232,30 @@ router.get('/ai/career-advice', authenticate, allowRoles('student'), async (req,
 
 
 // ---------------- AI assessment workflow ----------------
+
 const assessmentRequestSchema = z.object({
   title: z.string().trim().min(3).max(160).optional(),
-  targetRole: z.string().trim().max(120).optional(),
-  skills: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
-  questionCount: z.union([z.literal(10),z.literal(20),z.literal(30),z.literal(50)]).default(10),
-  difficulty: z.enum(['easy','medium','hard','mixed']).default('mixed'),
+
+  targetRole: z.string().trim().min(2).max(120).optional(),
+
+  skills: z.array(z.string().trim().min(1).max(60)).max(30).optional(),
+
+  questionCount: z.union([
+    z.literal(5),
+    z.literal(10),
+    z.literal(15),
+    z.literal(20),
+    z.literal(25)
+  ]).default(10),
+
+  difficulty: z.enum(['easy', 'medium', 'hard', 'mixed']).default('mixed'),
+
   durationMinutes: z.number().int().min(5).max(240).default(30)
 });
 
+const selfAssessmentRequestSchema = assessmentRequestSchema.extend({
+  targetRole: z.string().trim().min(2, 'Target role is required').max(120)
+});
 function questionPayload(question, index) {
   return {
     index, prompt: question.prompt, type: question.type, options: question.options,
@@ -283,7 +298,7 @@ router.get('/assessments', authenticate, async (req, res, next) => {
 
 router.post('/assessments/generate', authenticate, allowRoles('student'), async (req,res,next) => {
   try {
-    const input = assessmentRequestSchema.parse(req.body);
+    const input = selfAssessmentRequestSchema.parse(req.body);
     const student = await Student.findOne({ user:req.user._id });
     if (!student) return res.status(400).json({ message:'Complete your student profile first.' });
     const skills = input.skills?.length ? input.skills : (student.skills || []);
@@ -312,10 +327,16 @@ router.post('/assessments/university', authenticate, allowRoles('admin','officer
     const branchFilter = input.targetBranch ? { branch:input.targetBranch } : {};
     const students = await Student.find(branchFilter).populate('user','_id').limit(500);
     const generated = await generateAssessmentQuestions({
-      student:{ branch:input.targetBranch || 'All engineering branches', skills:input.skills || [] },
-      skills:input.skills || [], targetRole:input.targetRole, count:input.questionCount,
-      difficulty:input.difficulty, mode:'university'
-    });
+  student: {
+    branch: input.targetBranch || 'All engineering branches',
+    skills: input.skills || []
+  },
+  skills: input.skills || [],
+  targetRole: input.targetBranch || input.targetRole || 'All engineering branches',
+  count: input.questionCount,
+  difficulty: input.difficulty,
+  mode: 'university'
+});
     const assessment = await Assessment.create({
       title:input.title || 'University placement assessment',
       description:input.description || 'University-wide assessment for placement readiness.',

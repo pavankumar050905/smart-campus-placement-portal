@@ -63,38 +63,158 @@ function fallbackQuestions({ skills, count, difficulty }) {
   return result;
 }
 
-export async function generateAssessmentQuestions({ student, skills = [], targetRole = '', count = 10, difficulty = 'mixed', mode = 'self' }) {
-  const requestedSkills = cleanList(skills.length ? skills : student?.skills);
-  const profile = {
-    branch: student?.branch || 'Engineering',
-    skills: requestedSkills,
-    projects: (student?.projects || []).map(p => ({ title:p.title, technologies:p.technologies || [] })),
-    certifications: (student?.certifications || []).map(c => c.name).filter(Boolean),
-    targetRole: String(targetRole || '').slice(0,120)
-  };
 
-  if (process.env.GROQ_API_KEY) {
-    try {
-      const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-      const response = await groq.chat.completions.create({
-        model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
-        temperature: 0.35,
-        max_completion_tokens: Math.min(7000, 1800 + count * 100),
-        messages: [
-          { role:'system', content:`Create an original university-level engineering placement assessment. Return ONLY valid JSON: {"questions":[{"prompt":"...","type":"conceptual|debugging|scenario|output|coding","options":["A","B","C","D"],"correctOption":0,"explanation":"...","topic":"...","difficulty":"easy|medium|hard"}]}. Exactly ${count} questions. Use a balanced mix of conceptual, debugging, code-output and practical scenario MCQs. Every question must have exactly four plausible options and exactly one defensible correct answer. Do not make trick or ambiguous questions. Do not include markdown. Questions must be tailored to the student's branch, skills, projects and target role. Distribute difficulty as requested: ${difficulty}.` },
-          { role:'user', content:JSON.stringify({ profile, requestedSkills, count, difficulty, mode }) }
-        ]
-      });
-      const raw = response.choices?.[0]?.message?.content || '';
-      const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,''));
-      const valid = validateQuestions(parsed.questions, count, difficulty);
-      if (valid.length === count) return { questions: valid, generationSource:'groq' };
-    } catch (error) {
-      console.warn('AI question generation unavailable; using validated local question bank:', error.message);
-    }
+export async function generateAssessmentQuestions({
+  student,
+  skills = [],
+  targetRole = '',
+  count = 10,
+  difficulty = 'mixed',
+  mode = 'self'
+}) {
+  const role = String(targetRole || '').trim();
+
+  if (role.length < 2) {
+    const error = new Error('Please enter a valid target role.');
+    error.status = 400;
+    throw error;
   }
-  return { questions: fallbackQuestions({ skills:requestedSkills, count, difficulty }), generationSource:'local-question-bank' };
+
+  if (!process.env.GROQ_API_KEY) {
+    const error = new Error('Groq API key is not configured.');
+    error.status = 503;
+    throw error;
+  }
+
+  try {
+    const groq = new Groq({
+      apiKey: process.env.GROQ_API_KEY
+    });
+
+    const response = await groq.chat.completions.create({
+      model: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
+      temperature: 0.25,
+      max_completion_tokens: Math.min(7000, 1800 + count * 100),
+      response_format: { type: 'json_object' },
+
+      messages: [
+        {
+          role: 'system',
+          content: `
+You are a professional technical assessment generator.
+
+ASSESSMENT MODE: ${mode}
+TARGET: ${role}
+
+STRICT RULES:
+
+${mode === 'self' ? `
+STUDENT SELF-ASSESSMENT:
+Generate questions exclusively about the student's entered target job role: ${role}.
+
+Do not generate questions based on the student's academic branch,
+unrelated skills, projects, generic CSE subjects or aptitude.
+
+Every question must directly relate to the responsibilities,
+technical knowledge and practical skills required for ${role}.
+` : `
+UNIVERSITY BRANCH ASSESSMENT:
+Generate questions exclusively about the engineering branch: ${role}.
+
+Cover the core subjects, technical concepts and practical
+applications of this specific engineering branch.
+
+Do not include unrelated CSE, programming or aptitude questions.
+`}
+
+Generate exactly ${count} questions.
+
+Difficulty: ${difficulty}.
+
+Each question must have:
+- Four plausible options.
+- Exactly one correct answer.
+- A clear explanation.
+- A relevant technical topic.
+- Appropriate difficulty.
+
+Return ONLY valid JSON in this format:
+
+{
+  "questions": [
+    {
+      "prompt": "Question",
+      "type": "conceptual",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctOption": 0,
+      "explanation": "Explanation",
+      "topic": "Relevant subject",
+      "difficulty": "easy"
+    }
+  ]
 }
+
+No markdown or additional text.
+`
+
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            targetRole: role,
+            questionCount: count,
+            difficulty,
+            mode
+          })
+        }
+      ]
+    });
+
+    const raw = response.choices?.[0]?.message?.content || '';
+
+    const parsed = JSON.parse(
+      raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+    );
+
+    const valid = validateQuestions(
+      parsed.questions,
+      count,
+      difficulty
+    );
+
+    if (valid.length !== count) {
+  console.error('Groq validation details:', {
+    requested: count,
+    received: Array.isArray(parsed.questions)
+      ? parsed.questions.length
+      : 'questions array missing',
+    valid: valid.length
+  });
+
+  throw new Error(
+    `Expected ${count} valid questions, received ${valid.length}.`
+  );
+}
+
+    return {
+      questions: valid,
+      generationSource: 'groq'
+    };
+
+  } catch (error) {
+    console.error('Assessment generation failed:', error.message);
+
+    const failure = new Error(
+      `Unable to generate a role-specific assessment for ${role}. Please try again.`
+    );
+
+     failure.status = error.status || error.statusCode || 503;
+  failure.code = error.code;
+  failure.cause = error;
+    throw failure;
+  }
+}
+
 
 export function publicAssessment(assessment) {
   const obj = assessment.toObject ? assessment.toObject() : { ...assessment };
