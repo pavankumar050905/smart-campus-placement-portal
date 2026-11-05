@@ -8,6 +8,7 @@ import { connectDB } from './config/db.js';
 import api from './routes/api.js';
 
 const app = express();
+app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173' }));
